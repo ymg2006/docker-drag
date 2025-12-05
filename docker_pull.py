@@ -9,6 +9,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import tarfile
 import urllib3
+import argparse
 urllib3.disable_warnings()
 
 def create_session():
@@ -35,9 +36,12 @@ def create_session():
 
     return session
 
-if len(sys.argv) < 2 :
-	print('Usage:\n\tdocker_pull.py [registry/][repository/]image[:tag|@digest] [username] [password]\n')
-	exit(1)
+parser = argparse.ArgumentParser(description='Pull Docker images without a Docker daemon by directly interacting with the registry API.')
+parser.add_argument('image', help='The Docker image to pull, e.g., "ubuntu:latest" or "hello-world@<digest>"')
+parser.add_argument('--username', help='The username to private repository')
+parser.add_argument('--password', help='The password to private repository')
+parser.add_argument('--platform', help='Set platform to pull a specific architecture, e.g., "linux/amd64" or "arm64"')
+args = parser.parse_args()
 
 # Create a session for all requests
 session = create_session()
@@ -45,12 +49,11 @@ session = create_session()
 # Look for the Docker image to download
 repo = 'library'
 tag = 'latest'
-imgparts = sys.argv[1].split('/')
-username = ""
-password = ""
-if len(sys.argv) >= 4:
-    username = sys.argv[2]
-    password = sys.argv[3]
+imgparts = args.image.split('/')
+username = args.username
+password = args.password
+platform = args.platform
+
 try:
     img,tag = imgparts[-1].split('@')
 except ValueError:
@@ -95,7 +98,7 @@ except requests.exceptions.RequestException as e:
 # Get Docker token (this function is useless for unauthenticated registries like Microsoft)
 def get_auth_head(type):
     try:
-        if len(username) != 0 and len(password) != 0:
+        if username and password:
             resp = session.get('{}?service={}&scope=repository:{}:pull'.format(auth_url, reg_service, repository), auth=(username, password),verify=False, timeout=30)
         else:
             resp = session.get('{}?service={}&scope=repository:{}:pull'.format(auth_url, reg_service, repository), verify=False, timeout=30)
@@ -154,13 +157,35 @@ try:
                     m['digest']
                 ))
 
-        # Try to find linux/amd64 platform first, then fall back to windows/amd64
         selected_manifest = None
-        for m in resp_json['manifests']:
-            platform = m.get('platform', {})
-            if platform.get('os') == 'linux' and platform.get('architecture') == 'amd64':
-                selected_manifest = m
-                break
+
+        if platform:
+          parts = args.platform.split('/')
+          req_os, req_arch, req_variant = None, None, None
+          if len(parts) == 1:
+              req_arch = parts[0]
+          elif len(parts) == 2:
+              req_os, req_arch = parts
+          elif len(parts) >= 3:
+              req_os, req_arch, req_variant = parts[:3]
+
+        if req_os and req_arch:
+          for m in resp_json['manifests']:
+                platform = m.get('platform', {})
+                if platform.get('os') == req_os and platform.get('architecture') == req_arch:
+                    if req_variant:
+                      if platform.get('variant') and platform.get('variant') == req_variant:
+                        selected_manifest = m
+                    else:
+                      selected_manifest = m
+                    break
+
+        if not selected_manifest:
+          for m in resp_json['manifests']:
+              platform = m.get('platform', {})
+              if platform.get('os') == 'linux' and platform.get('architecture') == 'amd64':
+                  selected_manifest = m
+                  break
 
         if not selected_manifest:
             for m in resp_json['manifests']:
