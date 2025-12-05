@@ -1,7 +1,6 @@
 import os
 import sys
 import gzip
-from io import BytesIO
 import json
 import hashlib
 import shutil
@@ -22,22 +21,22 @@ def create_session():
     adapter = HTTPAdapter(max_retries=retry_strategy)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
-    
+
     # Check if proxy environment variables are set
     http_proxy = os.environ.get('HTTP_PROXY') or os.environ.get('http_proxy')
     https_proxy = os.environ.get('HTTPS_PROXY') or os.environ.get('https_proxy')
-    
+
     if http_proxy or https_proxy:
         session.proxies = {
             'http': http_proxy,
             'https': https_proxy
         }
         print('[+] Using proxy settings from environment')
-    
+
     return session
 
-if len(sys.argv) != 2 :
-	print('Usage:\n\tdocker_pull.py [registry/][repository/]image[:tag|@digest]\n')
+if len(sys.argv) < 2 :
+	print('Usage:\n\tdocker_pull.py [registry/][repository/]image[:tag|@digest] [username] [password]\n')
 	exit(1)
 
 # Create a session for all requests
@@ -47,6 +46,11 @@ session = create_session()
 repo = 'library'
 tag = 'latest'
 imgparts = sys.argv[1].split('/')
+username = ""
+password = ""
+if len(sys.argv) >= 4:
+    username = sys.argv[2]
+    password = sys.argv[3]
 try:
     img,tag = imgparts[-1].split('@')
 except ValueError:
@@ -91,7 +95,10 @@ except requests.exceptions.RequestException as e:
 # Get Docker token (this function is useless for unauthenticated registries like Microsoft)
 def get_auth_head(type):
     try:
-        resp = session.get('{}?service={}&scope=repository:{}:pull'.format(auth_url, reg_service, repository), verify=False, timeout=30)
+        if len(username) != 0 and len(password) != 0:
+            resp = session.get('{}?service={}&scope=repository:{}:pull'.format(auth_url, reg_service, repository), auth=(username, password),verify=False, timeout=30)
+        else:
+            resp = session.get('{}?service={}&scope=repository:{}:pull'.format(auth_url, reg_service, repository), verify=False, timeout=30)
         access_token = resp.json()['token']
         auth_head = {'Authorization':'Bearer '+ access_token, 'Accept': type}
         return auth_head
@@ -135,7 +142,7 @@ try:
     resp_json = resp.json()
     print('[+] Response JSON structure:')
     print(json.dumps(resp_json, indent=2))
-    
+
     # Handle manifest list (multi-arch images)
     if 'manifests' in resp_json:
         print('[+] This is a multi-arch image. Available platforms:')
@@ -146,7 +153,7 @@ try:
                     m['platform'].get('architecture', 'unknown'),
                     m['digest']
                 ))
-        
+
         # Try to find linux/amd64 platform first, then fall back to windows/amd64
         selected_manifest = None
         for m in resp_json['manifests']:
@@ -154,30 +161,30 @@ try:
             if platform.get('os') == 'linux' and platform.get('architecture') == 'amd64':
                 selected_manifest = m
                 break
-        
+
         if not selected_manifest:
             for m in resp_json['manifests']:
                 platform = m.get('platform', {})
                 if platform.get('os') == 'windows' and platform.get('architecture') == 'amd64':
                     selected_manifest = m
                     break
-        
+
         if not selected_manifest:
             # If no preferred platform found, use the first one
             selected_manifest = resp_json['manifests'][0]
-        
+
         print('[+] Selected platform: {}/{}'.format(
             selected_manifest['platform'].get('os', 'unknown'),
             selected_manifest['platform'].get('architecture', 'unknown')
         ))
-        
+
         # Fetch the specific manifest
         try:
             # Get fresh auth token for manifest
             manifest_auth_head = get_auth_head('application/vnd.docker.distribution.manifest.v2+json')
             manifest_resp = session.get(
                 'https://{}/v2/{}/manifests/{}'.format(registry, repository, selected_manifest['digest']),
-                headers=manifest_auth_head,  # 使用新的认证头
+                headers=manifest_auth_head,
                 verify=False,
                 timeout=30
             )
@@ -190,15 +197,15 @@ try:
         except Exception as e:
             print('[-] Error fetching specific manifest:', e)
             exit(1)
-    
+
     # Now we should have the actual manifest with layers
     if 'layers' not in resp_json:
         print('[-] Error: No layers found in manifest')
         print('[-] Available keys:', list(resp_json.keys()))
         exit(1)
-    
+
     layers = resp_json['layers']
-    
+
 except KeyError as e:
     print('[-] Error: Could not find required key in response:', e)
     print('[-] Available keys:', list(resp_json.keys()))
@@ -294,7 +301,7 @@ for layer in layers:
 	os.remove(layerdir + '/layer_gzip.tar')
 	print("\r{}: Pull complete [{}]".format(ublob[7:19], bresp.headers['Content-Length']))
 	content[0]['Layers'].append(fake_layerid + '/layer.tar')
-	
+
 	# Creating json file
 	file = open(layerdir + '/json', 'w')
 	# last layer = config manifest - history - rootfs
